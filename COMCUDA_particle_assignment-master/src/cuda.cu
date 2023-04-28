@@ -83,7 +83,7 @@ __global__ void test(Particle* d_particles, unsigned int* d_pixel_contribs) {
             const float pixel_distance = sqrtf(x_ab * x_ab + y_ab * y_ab);
             if (pixel_distance <= d_particles[i].radius) {
                 const unsigned int pixel_offset = y * D_OUTPUT_IMAGE_WIDTH + x;
-                ++d_pixel_contribs[pixel_offset];
+                atomicAdd(&d_pixel_contribs[pixel_offset], 1);
 
             }
         }
