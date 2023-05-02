@@ -76,29 +76,29 @@ __global__ void stage1(Particle* d_particles, unsigned int* d_pixel_contribs) {
     const int pixel_offset = y * D_OUTPUT_IMAGE_WIDTH + x;
     int pixel_contrib = 0;
     for (int i = 0; i < blockDim.x; ++i) {
-        const int x_ab = x + 0.5f - shared_particles[i].location[0];
-        const int y_ab = y + 0.5f - shared_particles[i].location[1];
-        const int pixel_distance_squared = x_ab * x_ab + y_ab * y_ab;
-        const int radius_squared = shared_particles[i].radius * shared_particles[i].radius;
+        const float x_ab = x + 0.5f - shared_particles[i].location[0];
+        const float y_ab = y + 0.5f - shared_particles[i].location[1];
+        const float pixel_distance_squared = x_ab * x_ab + y_ab * y_ab;
+        const float radius_squared = shared_particles[i].radius * shared_particles[i].radius;
         if (pixel_distance_squared <= radius_squared) {
             pixel_contrib++;
         }
     }
-    // Use a single atomic operation to update multiple pixels within a block
+    __syncthreads();
     atomicAdd(&d_pixel_contribs[pixel_offset], pixel_contrib);
 }
-void cuda_stage1() {
-    // Optionally during development call the skip function with the correct inputs to skip this stage
-    // You will need to copy the data back to host before passing to these functions
-    // skip_pixel_contribs(particles, particles_count, return_pixel_contribs, out_image_width, out_image_height);
-    const int block_size = 256;
-    const int num_blocks_x = (cuda_output_image_width + block_size - 1) / block_size;
-    const int num_blocks_y = (cuda_output_image_height + block_size - 1) / block_size;
-    const dim3 num_blocks(num_blocks_x, num_blocks_y);
-    const dim3 block_size_2d(block_size, block_size);
-    CUDA_CALL(cudaMemset(d_pixel_contribs, 0, cuda_output_image_width * cuda_output_image_height * sizeof(unsigned int)));
-    stage1 << <num_blocks, block_size_2d >> > (d_particles, d_pixel_contribs);
 
+void cuda_stage1() {
+    const int block_size_x = 16;
+    const int block_size_y = 16;
+    const dim3 block_size(block_size_x, block_size_y);
+
+    const int num_blocks_x = (cuda_output_image_width + block_size_x - 1) / block_size_x;
+    const int num_blocks_y = (cuda_output_image_height + block_size_y - 1) / block_size_y;
+    const dim3 num_blocks(num_blocks_x, num_blocks_y);
+
+    CUDA_CALL(cudaMemset(d_pixel_contribs, 0, cuda_output_image_width * cuda_output_image_height * sizeof(unsigned int)));
+    stage1 << <num_blocks, block_size >> > (d_particles, d_pixel_contribs);
 
 
 #ifdef VALIDATION
