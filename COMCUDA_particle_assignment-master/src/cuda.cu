@@ -63,56 +63,41 @@ void cuda_begin(const Particle* init_particles, const unsigned int init_particle
 }
 
 __global__ void stage1(Particle* d_particles, unsigned int* d_pixel_contribs) {
-    // Load particle information into shared memory
     __shared__ Particle shared_particles[256];
-    const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    const int num_particles = min(blockDim.x, cuda_particles_count - blockIdx.x * blockDim.x);
-    for (int j = threadIdx.x; j < num_particles; j += blockDim.x) {
-        shared_particles[j] = d_particles[blockIdx.x * blockDim.x + j];
-    }
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    shared_particles[threadIdx.x] = d_particles[idx];
     __syncthreads();
 
-    // Compute lookup table for distance calculations
-    __shared__ float dist_table[256 * 256];
-    for (int j = threadIdx.x; j < 256; j += blockDim.x) {
-        for (int k = 0; k < 256; ++k) {
-            const float x_ab = (float)k + 0.5f - shared_particles[j].location[0];
-            const float y_ab = (float)j + 0.5f - shared_particles[j].location[1];
-            const float pixel_distance = sqrtf(x_ab * x_ab + y_ab * y_ab);
-            dist_table[j * 256 + k] = pixel_distance;
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= D_OUTPUT_IMAGE_WIDTH || y >= D_OUTPUT_IMAGE_HEIGHT) {
+        return;
+    }
+    const int pixel_offset = y * D_OUTPUT_IMAGE_WIDTH + x;
+    int pixel_contrib = 0;
+    for (int i = 0; i < blockDim.x; ++i) {
+        const int x_ab = x + 0.5f - shared_particles[i].location[0];
+        const int y_ab = y + 0.5f - shared_particles[i].location[1];
+        const int pixel_distance_squared = x_ab * x_ab + y_ab * y_ab;
+        const int radius_squared = shared_particles[i].radius * shared_particles[i].radius;
+        if (pixel_distance_squared <= radius_squared) {
+            pixel_contrib++;
         }
     }
-    __syncthreads();
-
-    // Update pixel contributions
-    for (int j = 0; j < num_particles; ++j) {
-        const int x_min = max(0, (int)roundf(shared_particles[j].location[0] - shared_particles[j].radius));
-        const int y_min = max(0, (int)roundf(shared_particles[j].location[1] - shared_particles[j].radius));
-        const int x_max = min(cuda_output_image_width - 1, (int)roundf(shared_particles[j].location[0] + shared_particles[j].radius));
-        const int y_max = min(cuda_output_image_height - 1, (int)roundf(shared_particles[j].location[1] + shared_particles[j].radius));
-        const int pixel_offset_start = y_min * cuda_output_image_width + x_min;
-        const int pixel_offset_end = (y_max + 1) * cuda_output_image_width - 1;
-        const float radius = shared_particles[j].radius;
-        for (int k = pixel_offset_start + threadIdx.x; k <= pixel_offset_end; k += blockDim.x) {
-            const int x = k % cuda_output_image_width;
-            const int y = k / cuda_output_image_width;
-            const float pixel_distance = dist_table[(int)(y - shared_particles[j].location[1] + radius) * 256 + (int)(x - shared_particles[j].location[0] + radius)];
-            if (pixel_distance <= radius) {
-                atomicAdd(&d_pixel_contribs[k], 1);
-            }
-        }
-    }
+    // Use a single atomic operation to update multiple pixels within a block
+    atomicAdd(&d_pixel_contribs[pixel_offset], pixel_contrib);
 }
-
 void cuda_stage1() {
     // Optionally during development call the skip function with the correct inputs to skip this stage
     // You will need to copy the data back to host before passing to these functions
     // skip_pixel_contribs(particles, particles_count, return_pixel_contribs, out_image_width, out_image_height);
     const int block_size = 256;
-    const int num_blocks = (cuda_particles_count + block_size - 1) / block_size;
+    const int num_blocks_x = (cuda_output_image_width + block_size - 1) / block_size;
+    const int num_blocks_y = (cuda_output_image_height + block_size - 1) / block_size;
+    const dim3 num_blocks(num_blocks_x, num_blocks_y);
+    const dim3 block_size_2d(block_size, block_size);
     CUDA_CALL(cudaMemset(d_pixel_contribs, 0, cuda_output_image_width * cuda_output_image_height * sizeof(unsigned int)));
-    stage1 << <num_blocks, block_size >> > (d_particles, d_pixel_contribs);
-
+    stage1 << <num_blocks, block_size_2d >> > (d_particles, d_pixel_contribs);
 
 
 
