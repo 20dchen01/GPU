@@ -148,7 +148,7 @@ __global__ void store_colors_depths_kernel(Particle* particles, unsigned int par
                 storage_offset += pixel_index[pixel_offset];
 
                 // Copy data to pixel_contrib buffers
-                printf("hi");
+                //printf("hi");
                 memcpy(pixel_contrib_colours + (4 * storage_offset), particles[i].color, 4 * sizeof(unsigned char));
                 memcpy(pixel_contrib_depth + storage_offset, &particles[i].location[2], sizeof(float));
             }
@@ -159,37 +159,53 @@ __global__ void store_colors_depths_kernel(Particle* particles, unsigned int par
 }
 
 // Bitonic sort kernel for sorting pairs
-__device__ void cuda_sort_pairs(float* keys, unsigned char* colors, int size) {
+__device__ void cuda_sort_pairs(float* keys, unsigned char* colors, int size, int max_size) {
+    extern __shared__ float shared_keys[];
+    extern __shared__ unsigned char shared_colors[];
+
     int tid = threadIdx.x;
 
+    if (tid >= max_size) return;
+
+    // Load keys and colors into shared memory
+    if (tid < size) {
+        shared_keys[tid] = keys[tid];
+        for (int c = 0; c < 4; ++c) {
+            shared_colors[4 * tid + c] = colors[4 * tid + c];
+        }
+    }
+
+    __syncthreads();
+
+    // Bitonic sort
     for (int k = 2; k <= size; k <<= 1) {
         for (int j = k >> 1; j > 0; j >>= 1) {
             int ixj = tid ^ j;
 
-            if (ixj > tid) {
+            if (ixj > tid && ixj < size) {
                 if ((tid & k) == 0) {
-                    if (keys[tid] > keys[ixj]) {
-                        float temp_key = keys[tid];
-                        keys[tid] = keys[ixj];
-                        keys[ixj] = temp_key;
+                    if (shared_keys[tid] > shared_keys[ixj]) {
+                        float temp_key = shared_keys[tid];
+                        shared_keys[tid] = shared_keys[ixj];
+                        shared_keys[ixj] = temp_key;
 
                         for (int c = 0; c < 4; ++c) {
-                            unsigned char temp_color = colors[4 * tid + c];
-                            colors[4 * tid + c] = colors[4 * ixj + c];
-                            colors[4 * ixj + c] = temp_color;
+                            unsigned char temp_color = shared_colors[4 * tid + c];
+                            shared_colors[4 * tid + c] = shared_colors[4 * ixj + c];
+                            shared_colors[4 * ixj + c] = temp_color;
                         }
                     }
                 }
                 else {
-                    if (keys[tid] < keys[ixj]) {
-                        float temp_key = keys[tid];
-                        keys[tid] = keys[ixj];
-                        keys[ixj] = temp_key;
+                    if (shared_keys[tid] < shared_keys[ixj]) {
+                        float temp_key = shared_keys[tid];
+                        shared_keys[tid] = shared_keys[ixj];
+                        shared_keys[ixj] = temp_key;
 
                         for (int c = 0; c < 4; ++c) {
-                            unsigned char temp_color = colors[4 * tid + c];
-                            colors[4 * tid + c] = colors[4 * ixj + c];
-                            colors[4 * ixj + c] = temp_color;
+                            unsigned char temp_color = shared_colors[4 * tid + c];
+                            shared_colors[4 * tid + c] = shared_colors[4 * ixj + c];
+                            shared_colors[4 * ixj + c] = temp_color;
                         }
                     }
                 }
@@ -199,8 +215,10 @@ __device__ void cuda_sort_pairs(float* keys, unsigned char* colors, int size) {
     }
 }
 
+
 // CUDA kernel for pair sorting
 __global__ void pair_sort_kernel(int image_width, int image_height, unsigned int* pixel_index, unsigned char* pixel_contrib_colours, float* pixel_contrib_depth) {
+    //printf("error here");
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= image_width * image_height) return;
 
@@ -213,7 +231,7 @@ __global__ void pair_sort_kernel(int image_width, int image_height, unsigned int
         float* keys = pixel_contrib_depth + left;
         unsigned char* colors = pixel_contrib_colours + 4 * left;
 
-        cuda_sort_pairs(keys, colors, size);
+        cuda_sort_pairs(keys, colors, size, blockDim.x);
     }
 }
 
@@ -226,10 +244,21 @@ void cuda_stage2() {
     // skip_sorted_pairs(particles, particles_count, pixel_index, out_image_width, out_image_height, return_pixel_contrib_colours, return_pixel_contrib_depth);
     // Exclusive prefix sum across the histogram to create an index
     // 
-    thrust::device_ptr<unsigned int> d_pixel_contribs_ptr(d_pixel_contribs);
+    /*thrust::device_ptr<unsigned int> d_pixel_contribs_ptr(d_pixel_contribs);
     thrust::device_ptr<unsigned int> d_pixel_index_ptr(d_pixel_index);
     thrust::exclusive_scan(d_pixel_contribs_ptr, d_pixel_contribs_ptr + (cuda_output_image_width * cuda_output_image_height), d_pixel_index_ptr);
     unsigned int total_contribs;
+
+    unsigned int* pixel_contribs;
+    unsigned int* pixel_index;
+
+    pixel_contribs = (unsigned int*)malloc(cuda_output_image_width * cuda_output_image_height * sizeof(unsigned int));
+    CUDA_CALL(cudaMemcpy(pixel_contribs, d_pixel_contribs, cuda_output_image_width * cuda_output_image_height * sizeof(unsigned int), cudaMemcpyDeviceToHost));
+    pixel_index = (unsigned int*)malloc((cuda_output_image_width * cuda_output_image_height + 1) * sizeof(unsigned int));
+    CUDA_CALL(cudaMemcpy(pixel_index, d_pixel_index, (cuda_output_image_width * cuda_output_image_height + 1) * sizeof(unsigned int), cudaMemcpyDeviceToHost));
+
+
+
     CUDA_CALL(cudaMemcpy(&total_contribs, d_pixel_index + cuda_output_image.width * cuda_output_image.height, sizeof(unsigned int), cudaMemcpyDeviceToHost));
 
     if (total_contribs > cuda_pixel_contrib_count) {
@@ -257,8 +286,10 @@ void cuda_stage2() {
     printf("grid2");
     //const int gridSize2 = (cuda_output_image.width * cuda_output_image.height + blockSize - 1) / blockSize;
     pair_sort_kernel << <gridSize, blockSize >> > (cuda_output_image.width, cuda_output_image.height, d_pixel_index, d_pixel_contrib_colours, d_pixel_contrib_depth);
+    printf("\n End of pair_sort");
     //CUDA_CALL(cudaGetLastError());
     CUDA_CALL(cudaDeviceSynchronize());
+    printf("\n End of synchh");*/
     
 #ifdef VALIDATION
     // TODO: Uncomment and call the validation functions with the correct inputs
@@ -266,40 +297,24 @@ void cuda_stage2() {
     // You will need to copy the data back to host before passing to these functions
     // (Ensure that data copy is carried out within the ifdef VALIDATION so that it doesn't affect your benchmark results!)
 
-    /*unsigned int* pixel_contribs;
-    unsigned int* pixel_index;
-
-    pixel_contribs = (unsigned int*)malloc(cuda_output_image_width * cuda_output_image_height * sizeof(unsigned int));
-    CUDA_CALL(cudaMemcpy(pixel_contribs, d_pixel_contribs, cuda_output_image_width * cuda_output_image_height * sizeof(unsigned int), cudaMemcpyDeviceToHost));
-
-    pixel_index = (unsigned int*)malloc((cuda_output_image_width * cuda_output_image_height + 1) * sizeof(unsigned int));
-    CUDA_CALL(cudaMemcpy(pixel_index, d_pixel_index, (cuda_output_image_width * cuda_output_image_height + 1) * sizeof(unsigned int), cudaMemcpyDeviceToHost));
-
-    validate_pixel_index(pixel_contribs, pixel_index, cuda_output_image_width, cuda_output_image_height);
-
-    Particle* particles;
+    /*Particle* particles;
     unsigned char* pixel_contrib_colours;
     float* pixel_contrib_depth;
 
     particles = (Particle*)malloc(cuda_particles_count * sizeof(Particle));
     CUDA_CALL(cudaMemcpy(particles, d_particles, cuda_particles_count * sizeof(Particle), cudaMemcpyDeviceToHost));
 
-    const unsigned int TOTAL_CONTRIBS = pixel_index[cuda_output_image_width * cuda_output_image_height];
-    pixel_contrib_colours = (unsigned char*)malloc(TOTAL_CONTRIBS * 4 * sizeof(unsigned char));
-    CUDA_CALL(cudaMemcpy(pixel_contrib_colours, d_pixel_contrib_colours, TOTAL_CONTRIBS * 4 * sizeof(unsigned char), cudaMemcpyDeviceToHost));
+    //const unsigned int TOTAL_CONTRIBS = pixel_index[cuda_output_image_width * cuda_output_image_height];
+    pixel_contrib_colours = (unsigned char*)malloc(total_contribs * 4 * sizeof(unsigned char));
+    CUDA_CALL(cudaMemcpy(pixel_contrib_colours, d_pixel_contrib_colours, total_contribs * 4 * sizeof(unsigned char), cudaMemcpyDeviceToHost));
 
-    pixel_contrib_depth = (float*)malloc(TOTAL_CONTRIBS * sizeof(float));
-    CUDA_CALL(cudaMemcpy(pixel_contrib_depth, d_pixel_contrib_depth, TOTAL_CONTRIBS * sizeof(float), cudaMemcpyDeviceToHost));
-
-    validate_sorted_pairs(particles, cuda_particles_count, pixel_index, cuda_output_image_width, cuda_output_image_height, pixel_contrib_colours, pixel_contrib_depth);*/
-
-
-
-
-    //validate_pixel_index(pixel_contribs, d_pixel_index, cuda_output_image_width, cuda_output_image_height);
-    //validate_sorted_pairs(particles, cuda_particles_count, d_pixel_index, cuda_output_image_width, cuda_output_image_height, pixel_contrib_colours, pixel_contrib_depth);
-    //validate_equalised_histogram(pixel_index, output_image_width, cpu_output_image_height);
+    pixel_contrib_depth = (float*)malloc(total_contribs * sizeof(float));
     
+    CUDA_CALL(cudaMemcpy(pixel_contrib_depth, d_pixel_contrib_depth, total_contribs * sizeof(float), cudaMemcpyDeviceToHost));
+    validate_pixel_index(pixel_contribs, pixel_index, cuda_output_image_width, cuda_output_image_height);
+    printf("\n After pixel");
+    validate_sorted_pairs(particles, cuda_particles_count, pixel_index, cuda_output_image_width, cuda_output_image_height, pixel_contrib_colours, pixel_contrib_depth);
+    printf("\n After everythimg");*/
 #endif    
 }
 
