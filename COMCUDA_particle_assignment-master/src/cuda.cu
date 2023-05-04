@@ -5,8 +5,8 @@
 #include <cmath>
 #include <device_launch_parameters.h>
 #include <cub/device/device_scan.cuh>
-//#include <thrust/scan.h>
-//#include <thrust/device_ptr.h>
+#include <thrust/scan.h>
+#include <thrust/device_ptr.h>
 
 ///
 /// Algorithm storage
@@ -14,7 +14,6 @@
 /// 
 /// 
 __device__ void cpu_sort_pairs(float* keys_start, unsigned char* colours_start, int first, int last);
-__device__ int lock = 0;
 
 // Number of particles in d_particles
 unsigned int cuda_particles_count;
@@ -153,14 +152,6 @@ __global__ void stage2(Particle* d_particles, unsigned int* d_pixel_contribs, un
                 const float pixel_distance = sqrtf(x_ab * x_ab + y_ab * y_ab);
                 if (pixel_distance <= d_particles[i].radius) {
                     const unsigned int pixel_offset = y * D_OUTPUT_IMAGE_WIDTH + x;
-                    // Offset into cpu_pixel_contrib buffers is index + histogram
-                    // Increment cpu_pixel_contribs, so next contributor stores to correct offset
-                    //unsigned int storage_offset = d_pixel_index[pixel_offset] + d_pixel_contribs[pixel_offset];
-                    //atomicAdd(&d_pixel_contribs[pixel_offset], 1);
-                    //// Copy data to cpu_pixel_contrib buffers;
-                    //memcpy(d_pixel_contrib_colours + (4 * storage_offset), d_particles[i].color, 4 * sizeof(unsigned char));
-                    //memcpy(d_pixel_contrib_depth + storage_offset, &d_particles[i].location[2], sizeof(float));
-
 
                     unsigned int storage_offset = atomicAdd(&d_pixel_contribs[pixel_offset], 1);
                     memcpy(d_pixel_contrib_colours + (4 * (d_pixel_index[pixel_offset] + storage_offset)), d_particles[i].color, 4 * sizeof(unsigned char));
@@ -190,13 +181,10 @@ __global__ void stageSort(unsigned int* d_pixel_index, unsigned char* d_pixel_co
 
 //https://nvlabs.github.io/cub/structcub_1_1_device_scan.html#a02b2d2e98f89f80813460f6a6ea1692b
 void sum(unsigned int* d_in, unsigned int* d_out, int num_items) {
-    void* dev_temp_storage = NULL;
-    size_t temp_storage_bytes = 0;
-    cub::DeviceScan::ExclusiveSum(dev_temp_storage, temp_storage_bytes, d_in, d_out, num_items);
-    cudaMalloc(&dev_temp_storage, temp_storage_bytes);
-    cub::DeviceScan::ExclusiveSum(dev_temp_storage, temp_storage_bytes, d_in, d_out, num_items);
+    thrust::device_ptr<unsigned int> dev_in_ptr(d_in);
+    thrust::device_ptr<unsigned int> dev_out_ptr(d_out);
+    thrust::exclusive_scan(dev_in_ptr, dev_in_ptr + num_items, dev_out_ptr);
 }
-
 
 void cuda_stage2() {
     // Optionally during development call the skip function/s with the correct inputs to skip this stage
