@@ -101,7 +101,10 @@ void validate_pixel_index(const unsigned int *pixel_contribs, const unsigned int
     // Validate and report result
     unsigned int bad_indices = 0;
     for (unsigned int i = 0; i < (out_image_width * out_image_height + 1); ++i) {
+        //printf("test_pixel_index[%d] = %d\n", i, test_pixel_index[i]);
+        //printf("pixel_index[%d] = %d\n", i, pixel_index[i]);
         if (test_pixel_index[i] != pixel_index[i]) {
+            
             ++bad_indices;
         }
     }
