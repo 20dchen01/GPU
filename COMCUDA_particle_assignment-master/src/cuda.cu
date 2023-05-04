@@ -179,12 +179,17 @@ __global__ void stageSort(unsigned int* d_pixel_index, unsigned char* d_pixel_co
     }
 }
 
-//https://nvlabs.github.io/cub/structcub_1_1_device_scan.html#a02b2d2e98f89f80813460f6a6ea1692b
 void sum(unsigned int* d_in, unsigned int* d_out, int num_items) {
-    thrust::device_ptr<unsigned int> dev_in_ptr(d_in);
+    /*thrust::device_ptr<unsigned int> dev_in_ptr(d_in);
     thrust::device_ptr<unsigned int> dev_out_ptr(d_out);
-    thrust::exclusive_scan(dev_in_ptr, dev_in_ptr + num_items, dev_out_ptr);
+    thrust::exclusive_scan(dev_in_ptr, dev_in_ptr + num_items, dev_out_ptr);*/
+    void* dev_temp_storage = NULL;
+    size_t temp_storage_bytes = 0;
+    cub::DeviceScan::ExclusiveSum(dev_temp_storage, temp_storage_bytes, d_in, d_out, num_items);
+    cudaMalloc(&dev_temp_storage, temp_storage_bytes);
+    cub::DeviceScan::ExclusiveSum(dev_temp_storage, temp_storage_bytes, d_in, d_out, num_items);
 }
+
 
 void cuda_stage2() {
     // Optionally during development call the skip function/s with the correct inputs to skip this stage
