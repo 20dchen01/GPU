@@ -7,7 +7,7 @@
 #include <cub/device/device_scan.cuh>
 #include <thrust/scan.h>
 #include <thrust/device_ptr.h>
-
+#define BLOCK_SIZE 1024
 ///
 /// Algorithm storage
 ///
@@ -70,47 +70,53 @@ void cuda_begin(const Particle* init_particles, const unsigned int init_particle
 
 
 __global__ void stage1(Particle* d_particles, unsigned int* d_pixel_contribs, unsigned int cuda_particles_count) {
-    // Update each particle & calculate how many particles contribute to each image
-    //int j = blockIdx.y * blockDim.y + threadIdx.y;
-    //int k = blockIdx.z * blockDim.z + threadIdx.z;
-    // Compute bounding box [inclusive-inclusive]
+    // Declare shared memory 
+    __shared__ Particle shared_particles[BLOCK_SIZE];
+
 
     for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < cuda_particles_count; i += blockDim.x * gridDim.x) {
-        int x_min = (int)roundf(d_particles[i].location[0] - d_particles[i].radius);
-        int y_min = (int)roundf(d_particles[i].location[1] - d_particles[i].radius);
-        int x_max = (int)roundf(d_particles[i].location[0] + d_particles[i].radius);
-        int y_max = (int)roundf(d_particles[i].location[1] + d_particles[i].radius);
+        // Load data into shared memory
+        shared_particles[threadIdx.x] = d_particles[i];
+        __syncthreads();
+
+        int x_min = (int)roundf(shared_particles[threadIdx.x].location[0] - shared_particles[threadIdx.x].radius);
+        int y_min = (int)roundf(shared_particles[threadIdx.x].location[1] - shared_particles[threadIdx.x].radius);
+        int x_max = (int)roundf(shared_particles[threadIdx.x].location[0] + shared_particles[threadIdx.x].radius);
+        int y_max = (int)roundf(shared_particles[threadIdx.x].location[1] + shared_particles[threadIdx.x].radius);
+
         // Clamp bounding box to image bounds
         x_min = x_min < 0 ? 0 : x_min;
         y_min = y_min < 0 ? 0 : y_min;
         x_max = x_max >= D_OUTPUT_IMAGE_WIDTH ? D_OUTPUT_IMAGE_WIDTH - 1 : x_max;
         y_max = y_max >= D_OUTPUT_IMAGE_HEIGHT ? D_OUTPUT_IMAGE_HEIGHT - 1 : y_max;
-        // For each pixel in the bounding box, check that it falls within the radius
-        // use device functions? tex memory?
+
+        // For each pixel in the bounding box, check if it falls within the radius
         for (int x = x_min; x <= x_max; ++x) {
             for (int y = y_min; y <= y_max; ++y) {
-                const float x_ab = (float)x + 0.5f - d_particles[i].location[0];
-                const float y_ab = (float)y + 0.5f - d_particles[i].location[1];
+                const float x_ab = (float)x + 0.5f - shared_particles[threadIdx.x].location[0];
+                const float y_ab = (float)y + 0.5f - shared_particles[threadIdx.x].location[1];
                 const float pixel_distance = sqrtf(x_ab * x_ab + y_ab * y_ab);
-                if (pixel_distance <= d_particles[i].radius) {
+
+                if (pixel_distance <= shared_particles[threadIdx.x].radius) {
                     const unsigned int pixel_offset = y * D_OUTPUT_IMAGE_WIDTH + x;
                     atomicAdd(&d_pixel_contribs[pixel_offset], 1);
                 }
             }
         }
+
+        __syncthreads();
     }
 }
 
 void cuda_stage1() {
     // Optionally during development call the skip function with the correct inputs to skip this stage
-    // You will need to copy thes data back to host before passing to these functions
+    // You will need to copy the data back to host before passing to these functions
     // skip_pixel_contribs(particles, particles_count, return_pixel_contribs, out_image_width, out_image_height);
 
-    int blockSize = 256;
-    int gridSize = (cuda_particles_count + blockSize - 1) / blockSize;
+    int gridSize = (cuda_particles_count + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
     CUDA_CALL(cudaMemset(d_pixel_contribs, 0, cuda_output_image_width * cuda_output_image_height * sizeof(unsigned int)));
-    stage1 << <gridSize, blockSize >> > (d_particles, d_pixel_contribs, cuda_particles_count);
+    stage1 << <gridSize, BLOCK_SIZE >> > (d_particles, d_pixel_contribs, cuda_particles_count);
 
 #ifdef VALIDATION
     // TODO: Uncomment and call the validation function with the correct inputs
@@ -131,38 +137,44 @@ void cuda_stage1() {
 __global__ void stage2(Particle* d_particles, unsigned int* d_pixel_contribs, unsigned int cuda_particles_count, unsigned char* d_pixel_contrib_colours, float* d_pixel_contrib_depth,
     unsigned int* d_pixel_index, unsigned int cuda_pixel_contrib_count) {
 
-    // Store colours according to index
-    // For each particle, store a copy of the colour/depth in cpu_pixel_contribs for each contributed pixel
-    // Compute bounding box [inclusive-inclusive]
-    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < cuda_particles_count; i += blockDim.x * gridDim.x) {
-        int x_min = (int)roundf(d_particles[i].location[0] - d_particles[i].radius);
-        int y_min = (int)roundf(d_particles[i].location[1] - d_particles[i].radius);
-        int x_max = (int)roundf(d_particles[i].location[0] + d_particles[i].radius);
-        int y_max = (int)roundf(d_particles[i].location[1] + d_particles[i].radius);
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (i < cuda_particles_count) {
+        Particle particle = d_particles[i];
+
+        int x_min = (int)roundf(particle.location[0] - particle.radius);
+        int y_min = (int)roundf(particle.location[1] - particle.radius);
+        int x_max = (int)roundf(particle.location[0] + particle.radius);
+        int y_max = (int)roundf(particle.location[1] + particle.radius);
         // Clamp bounding box to image bounds
-        x_min = x_min < 0 ? 0 : x_min;
-        y_min = y_min < 0 ? 0 : y_min;
-        x_max = x_max >= D_OUTPUT_IMAGE_WIDTH ? D_OUTPUT_IMAGE_WIDTH - 1 : x_max;
-        y_max = y_max >= D_OUTPUT_IMAGE_HEIGHT ? D_OUTPUT_IMAGE_HEIGHT - 1 : y_max;
+        x_min = max(x_min, 0);
+        y_min = max(y_min, 0);
+        x_max = min(x_max, D_OUTPUT_IMAGE_WIDTH - 1);
+        y_max = min(y_max, D_OUTPUT_IMAGE_HEIGHT - 1);
+
         // Store data for every pixel within the bounding box that falls within the radius
         for (int x = x_min; x <= x_max; ++x) {
             for (int y = y_min; y <= y_max; ++y) {
-                const float x_ab = (float)x + 0.5f - d_particles[i].location[0];
-                const float y_ab = (float)y + 0.5f - d_particles[i].location[1];
+                const float x_ab = (float)x + 0.5f - particle.location[0];
+                const float y_ab = (float)y + 0.5f - particle.location[1];
                 const float pixel_distance = sqrtf(x_ab * x_ab + y_ab * y_ab);
-                if (pixel_distance <= d_particles[i].radius) {
+                if (pixel_distance <= particle.radius) {
                     const unsigned int pixel_offset = y * D_OUTPUT_IMAGE_WIDTH + x;
 
                     unsigned int storage_offset = atomicAdd(&d_pixel_contribs[pixel_offset], 1);
-                    memcpy(d_pixel_contrib_colours + (4 * (d_pixel_index[pixel_offset] + storage_offset)), d_particles[i].color, 4 * sizeof(unsigned char));
-                    memcpy(d_pixel_contrib_depth + (d_pixel_index[pixel_offset] + storage_offset), &d_particles[i].location[2], sizeof(float));
+                    unsigned char* pixel_contrib_colours_ptr = d_pixel_contrib_colours + (4 * (d_pixel_index[pixel_offset] + storage_offset));
+                    float* pixel_contrib_depth_ptr = d_pixel_contrib_depth + (d_pixel_index[pixel_offset] + storage_offset);
 
+                    pixel_contrib_colours_ptr[0] = particle.color[0];
+                    pixel_contrib_colours_ptr[1] = particle.color[1];
+                    pixel_contrib_colours_ptr[2] = particle.color[2];
+                    pixel_contrib_colours_ptr[3] = particle.color[3];
 
+                    *pixel_contrib_depth_ptr = particle.location[2];
                 }
             }
         }
     }
-
 }
 
 
@@ -179,17 +191,6 @@ __global__ void stageSort(unsigned int* d_pixel_index, unsigned char* d_pixel_co
     }
 }
 
-void sum(unsigned int* d_in, unsigned int* d_out, int num_items) {
-    /*thrust::device_ptr<unsigned int> dev_in_ptr(d_in);
-    thrust::device_ptr<unsigned int> dev_out_ptr(d_out);
-    thrust::exclusive_scan(dev_in_ptr, dev_in_ptr + num_items, dev_out_ptr);*/
-    void* dev_temp_storage = NULL;
-    size_t temp_storage_bytes = 0;
-    cub::DeviceScan::ExclusiveSum(dev_temp_storage, temp_storage_bytes, d_in, d_out, num_items);
-    cudaMalloc(&dev_temp_storage, temp_storage_bytes);
-    cub::DeviceScan::ExclusiveSum(dev_temp_storage, temp_storage_bytes, d_in, d_out, num_items);
-}
-
 
 void cuda_stage2() {
     // Optionally during development call the skip function/s with the correct inputs to skip this stage
@@ -199,8 +200,18 @@ void cuda_stage2() {
 
     unsigned int* pixel_index;
     pixel_index = (unsigned int*)malloc((cuda_output_image_width * cuda_output_image_height + 1) * sizeof(unsigned int));
-
-    sum(d_pixel_contribs, d_pixel_index, cuda_output_image_width * cuda_output_image_height + 1);
+    //sum with thrust
+    /*thrust::device_ptr<unsigned int> dev_in_ptr(d_in);
+    thrust::device_ptr<unsigned int> dev_out_ptr(d_out);
+    thrust::exclusive_scan(dev_in_ptr, dev_in_ptr + num_items, dev_out_ptr); */
+    //sum with cub
+    void* dev_temp_storage = NULL;
+    size_t temp_storage_bytes = 0;
+    cub::DeviceScan::ExclusiveSum(dev_temp_storage, temp_storage_bytes, d_pixel_contribs, d_pixel_index, cuda_output_image_width * cuda_output_image_height + 1);
+    cudaMalloc(&dev_temp_storage, temp_storage_bytes);
+    cub::DeviceScan::ExclusiveSum(dev_temp_storage, temp_storage_bytes, d_pixel_contribs, d_pixel_index, cuda_output_image_width * cuda_output_image_height + 1);
+    
+    
     cudaMemcpy(pixel_index, d_pixel_index, (cuda_output_image_width * cuda_output_image_height + 1) * sizeof(unsigned int), cudaMemcpyDeviceToHost);
 
 
@@ -219,14 +230,13 @@ void cuda_stage2() {
 
 
     // Reset the pixel contributions histogram
-    int blockSize = 256;
-    int gridSize = (cuda_particles_count + blockSize - 1) / blockSize;
+    int gridSize = (cuda_particles_count + BLOCK_SIZE - 1) / BLOCK_SIZE;
     CUDA_CALL(cudaMemset(d_pixel_contribs, 0, cuda_output_image_width * cuda_output_image_height * sizeof(unsigned int)));
-    stage2 << <gridSize, blockSize >> > (d_particles, d_pixel_contribs, cuda_particles_count, d_pixel_contrib_colours, d_pixel_contrib_depth, d_pixel_index, cuda_pixel_contrib_count);
+    stage2 << <gridSize, BLOCK_SIZE >> > (d_particles, d_pixel_contribs, cuda_particles_count, d_pixel_contrib_colours, d_pixel_contrib_depth, d_pixel_index, cuda_pixel_contrib_count);
 
-    int gridSizeSort = (cuda_output_image_width * cuda_output_image_height + blockSize - 1) / blockSize;
+    int gridSizeSort = (cuda_output_image_width * cuda_output_image_height + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
-    stageSort << <gridSizeSort, blockSize >> > (d_pixel_index, d_pixel_contrib_colours, d_pixel_contrib_depth, cuda_output_image_width * cuda_output_image_height);
+    stageSort << <gridSizeSort, BLOCK_SIZE >> > (d_pixel_index, d_pixel_contrib_colours, d_pixel_contrib_depth, cuda_output_image_width * cuda_output_image_height);
 
 #ifdef VALIDATION
     // TODO: Uncomment and call the validation functions with the correct inputs
@@ -285,11 +295,10 @@ void cuda_stage3() {
     // skip_blend(pixel_index, pixel_contrib_colours, return_output_image);
     // Memset output image data to 255 (white)
     const int CHANNELS = 3;  // RGB
-    int blockSize = 256;
-    int gridSize = (cuda_output_image_width * cuda_output_image_height + blockSize - 1) / blockSize;
+    int gridSize = (cuda_output_image_width * cuda_output_image_height + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
     CUDA_CALL(cudaMemset(d_output_image_data, 255, cuda_output_image_width * cuda_output_image_height * CHANNELS * sizeof(unsigned char)));
-    stage3 << <gridSize, blockSize >> > (d_output_image_data, d_pixel_contrib_colours, d_pixel_index);
+    stage3 << <gridSize, BLOCK_SIZE >> > (d_output_image_data, d_pixel_contrib_colours, d_pixel_index);
 
 
 #ifdef VALIDATION
