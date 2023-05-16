@@ -138,7 +138,7 @@ __global__ void stage2(Particle* d_particles, unsigned int* d_pixel_contribs, un
     unsigned int* d_pixel_index, unsigned int cuda_pixel_contrib_count) {
 
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-
+    //for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < cuda_particles_count; i += blockDim.x * gridDim.x) {
     if (i < cuda_particles_count) {
         Particle particle = d_particles[i];
 

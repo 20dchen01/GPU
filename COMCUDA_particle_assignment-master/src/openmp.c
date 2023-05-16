@@ -95,9 +95,8 @@ void openmp_stage2() {
     // Exclusive prefix sum across the histogram to create an index
 
     openmp_pixel_index[0] = 0;
-
-    //#pragma omp parallel for
-    for (int i = 0; i < openmp_output_image.width * openmp_output_image.height; ++i) {
+    int i ;
+    for (i = 0; i < openmp_output_image.width * openmp_output_image.height; ++i) {
         openmp_pixel_index[i + 1] = openmp_pixel_index[i] + openmp_pixel_contribs[i];
     }
 
@@ -116,12 +115,6 @@ void openmp_stage2() {
     memset(openmp_pixel_contribs, 0, openmp_output_image.width * openmp_output_image.height * sizeof(unsigned int));
     // Store colours according to index
     // For each particle, store a copy of the colour/depth in openmp_pixel_contribs for each contributed pixel
-    int i;
-    //#pragma omp parallel for shared(openmp_particles, openmp_pixel_index, openmp_pixel_contribs, openmp_pixel_contrib_colours, openmp_pixel_contrib_depth, openmp_output_image) private(i)
-    //#pragma omp parallel for schedule(static,2) private(i)
-
-    //omp_set_nested(1);
-//#pragma omp parallel for schedule(dynamic)
     for (i = 0; i < openmp_particles_count; ++i) {
         // Compute bounding box [inclusive-inclusive]
         int x_min = (int)roundf(openmp_particles[i].location[0] - openmp_particles[i].radius);
